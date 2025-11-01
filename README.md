@@ -1,7 +1,18 @@
-# 🌙 Sin Land
+# Sin Land
 
-> ― 罪の世界をめぐる、奇妙で静かな旅 ―  
-OpenSiv3D で制作された2Dアクションアドベンチャーゲームです。
+> ― 罪
+OpenSiv3D で制作された2Dアクションアドベンチャーゲームです
+
+---
+
+## ⚙️ インストール方法
+
+### 🪟 Windows
+
+1. [公式サイト](https://siv3d.github.io/ja-jp/) から **OpenSiv3D (v0.6 以降)** をインストール。  
+2. このリポジトリをクローンまたはZIPでダウンロード。  
+   ```bash
+   git clone https://github.com/yourname/sin-land.git
 
 ---
 
@@ -80,12 +91,3 @@ OpenSiv3D で制作された2Dアクションアドベンチャーゲームで�
 > 三回正解でクリア、ミスでやり直しという緊張感を演出。
 
 ---
-
-## ⚙️ インストール方法
-
-### 🪟 Windows
-
-1. [公式サイト](https://siv3d.github.io/ja-jp/) から **OpenSiv3D (v0.6 以降)** をインストール。  
-2. このリポジトリをクローンまたはZIPでダウンロード。  
-   ```bash
-   git clone https://github.com/yourname/sin-land.git
