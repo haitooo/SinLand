@@ -12,14 +12,14 @@
 [⬇️ SinLand_Windows.zip をダウンロード](SinLand.zip)
 1. ZIPファイルを解凍してください。
 2. 解凍されたフォルダに入っているSinLand.exeを実行してください。
-4. 3.もし.exeを移動したい場合は、SinLand.exeと同じディレクトリ内にAssetsフォルダを一緒に配置してください。音声などが正常に再生されなくなります。
+3. もしSinLand.exeを移動したい場合は、SinLand.exeと同じディレクトリ内にAssetsフォルダを一緒に配置してください。音声などが正常に再生されなくなります。
 
 # git cloneする場合 
 1. このリポジトリをクローンしてください。
    ```bash
    git clone https://github.com/haitooo/SinLand.git
-2.クローンしたリポジトリからSinLand.exeを実行してください。
-3.もしSinLand.exeを移動したい場合は、SinLand.exeと同じディレクトリ内にAssetsフォルダを一緒に配置してください。音声などが正常に再生されなくなります。
+2. クローンしたリポジトリからSinLand.exeを実行してください。
+3. もしSinLand.exeを移動したい場合は、SinLand.exeと同じディレクトリ内にAssetsフォルダを一緒に配置してください。音声などが正常に再生されなくなります。
 
 ### 🍎🐧 Apple・Linux
 1. [公式サイト](https://siv3d.github.io/ja-jp/) から **OpenSiv3D (v0.6 以降)** をインストール
