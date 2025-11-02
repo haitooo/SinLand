@@ -10,6 +10,9 @@ void StopAllAudio()
 	AudioAsset(U"stage1BGM").stop();
 	AudioAsset(U"heartbeat").stop();
 	AudioAsset(U"monkeySE").stop();
+	AudioAsset(U"green2SE").stop();
+	AudioAsset(U"car3SE").stop();
+	AudioAsset(U"stageLastBGM").stop();
 }
 
 //============================= プレイヤー =============================
@@ -207,7 +210,6 @@ class Title : public App::Scene {
 	UIButton start{ RectF{ Arg::center = Scene::Center().movedBy(0, 40), 220, 48 }, U"スタート" };
 	UIButton select{ RectF{ Arg::center = Scene::Center().movedBy(0, 100), 220, 48 }, U"ステージセレクト" };
 
-	// 背景リング
 	struct Ring {
 		Vec2 pos; double r, alpha, shrink;
 		Ring(Vec2 p) : pos{ p }, r{ Random(280.0, 420.0) }, alpha{ 0.35 }, shrink{ Random(0.985, 0.992) } {}
@@ -215,46 +217,60 @@ class Title : public App::Scene {
 		void draw() const { Circle(pos, r).drawFrame(r * 0.25, ColorF{ 0.5, 0.5, 0.5, alpha }); }
 	};
 
-	//==================== メンバ ====================
 	Array<Ring> rings;
 	Stopwatch spawn{ StartImmediately::Yes };
 
-	// フェードアウト制御
-	bool fading = false;
+	bool   fading = false;
 	Stopwatch fadeSW{ StartImmediately::No };
 	double fadeOutSec = 0.6;
 
+	// === キーボード選択 ===
+	int focus = -1; // -1: 解除 / 0: start / 1: select
+
+	void drawFocusOverlay(const RectF& r) const {
+		r.draw(ColorF{ 0,0,0, 0.12 });
+		r.stretched(-2).draw(ColorF{ 0,0,0, 0.06 });
+		r.drawFrame(2, 0, ColorF{ 0,0,0, 0.15 });
+	}
+
 public:
-	Title(const InitData& init)
-		: IScene{ init }
-	{
+	Title(const InitData& init) : IScene{ init } {
 		AudioAsset::Register(U"UIenterSE", U"Assets/UIenterSE.mp3");
+		AudioAsset(U"UIenterSE").setVolume(0.5);
 		AudioAsset::Register(U"UIselectSE", U"Assets/UIselectSE.mp3");
 	}
 
-	void update() override
-	{
-		// 背景リング
-		if (spawn.sF() >= 1.5) {
-			rings << Ring{ Vec2{ Random(0.0, (double)Scene::Width()),
-								 Random(0.0, (double)Scene::Height()) } };
-			spawn.restart();
-		}
+	void update() override {
+		// 背景
+		if (spawn.sF() >= 1.5) { rings << Ring{ Vec2{ Random(0.0, (double)Scene::Width()), Random(0.0, (double)Scene::Height()) } }; spawn.restart(); }
 		for (auto& g : rings) g.update();
 		rings.remove_if([](const Ring& g) { return g.alpha <= 0.02; });
-
-		// 背景
 		Scene::SetBackground(ColorF{ 0.96, 0.98, 1.0 });
-		for (const auto& g : rings) g.draw();
 
-		// UI
+		// === マウスホバーがあればキーボード選択を解除 ===
+		const bool anyHover = (start.rect.mouseOver() || select.rect.mouseOver());
+		if (anyHover) focus = -1;
+
+		// === キー操作 ===
+		if (!fading) {
+			auto ensureFocus = [&]() { if (focus == -1) focus = 0; }; // 解除中に矢印で復帰したらStartへ
+
+			int prev = focus;
+			if (KeyLeft.down() || KeyUp.down()) { ensureFocus(); focus = Max(0, focus - 1); }
+			if (KeyRight.down() || KeyDown.down()) { ensureFocus(); focus = Min(1, focus + 1); }
+			if (focus != prev && focus != -1) AudioAsset(U"UIselectSE").play();
+
+			if ((KeyEnter.down() || KeyK.down() || KeySpace.down()) && focus != -1) {
+				AudioAsset(U"UIenterSE").play();
+				if (focus == 0) { fading = true; fadeSW.restart(); }
+				else { StopAllAudio(); changeScene(State::Select, 0.3s); }
+			}
+		}
+
+		// 既存マウス
 		if (!fading) {
 			if (start.drawAndCheck(font)) { fading = true; fadeSW.restart(); }
-			if (select.drawAndCheck(font))
-			{
-				StopAllAudio();
-				changeScene(State::Select, 0.3s);
-			}
+			if (select.drawAndCheck(font)) { StopAllAudio(); changeScene(State::Select, 0.3s); }
 		}
 		else {
 			if (fadeSW.sF() >= fadeOutSec) {
@@ -262,14 +278,20 @@ public:
 				changeScene(State::Stage1, 0.0s);
 			}
 		}
-		if (KeyEscape.down()) {
-			System::Exit();
-		}
+
+		if (KeyEscape.down()) { System::Exit(); }
 	}
 
-	void draw() const override
-	{
+	void draw() const override {
+		for (const auto& g : rings) g.draw();
 		title(U"シン・ランド").drawAt(Scene::Center().movedBy(0, -60), ColorF{ 0.1 });
+
+		start.draw(font);
+		select.draw(font);
+
+		if (!fading && focus != -1) {
+			drawFocusOverlay((focus == 0) ? start.rect : select.rect);
+		}
 
 		if (fading) {
 			const double a = Clamp(fadeSW.sF() / fadeOutSec, 0.0, 1.0);
@@ -281,67 +303,228 @@ public:
 
 //----------------------------- Select -----------------------------
 class Select : public App::Scene {
-	Font title{ 28, Typeface::Bold }, font{ 18 };
-	Array<UIButton> buttons;
+	Font font{ 18 };
+
+	struct StageEntry { String name; bool available; Optional<State> target; };
+	Array<StageEntry> entries;
+	Array<UIButton>   buttons;
+
+	UIButton deleteBtn{ RectF{ 20, 20, 120, 34 }, U"データ削除" };
+	UIButton backBtn{ RectF{ 0, 0, 120, 34 }, U"戻る" }; // ctorで中央上
+
+	// レイアウト
+	static constexpr int kCols = 3;
+	const double btnW = 220, btnH = 46, gapX = 64, gapY = 60;
+	double startX = 0, startY = 150;
+
+	// キーボード選択（-1: 解除 / 0: 戻る / 1: データ削除 / 2..: ステージ）
+	int focus = -1;
+
+	void drawFocusOverlay(const RectF& r) const {
+		r.draw(ColorF{ 0,0,0, 0.12 });
+		r.stretched(-2).draw(ColorF{ 0,0,0, 0.06 });
+		r.drawFrame(2, 0, ColorF{ 0,0,0, 0.15 });
+	}
+
+	void loadStageNamesIfAny() {
+		TextReader r{ U"Assets/StageNames.txt" };
+		if (!r) return;
+		Array<String> lines; String line;
+		while (r.readLine(line)) { lines << line.trimmed(); if (lines.size() >= entries.size()) break; }
+		for (size_t i = 0; i < Min(lines.size(), entries.size()); ++i) {
+			if (!lines[i].isEmpty()) entries[i].name = lines[i];
+		}
+	}
+
+	RectF rectOfIndex(int idx) const {
+		if (idx == 0) return backBtn.rect;
+		if (idx == 1) return deleteBtn.rect;
+		const int bi = idx - 2;
+		if (bi >= 0 && bi < (int)buttons.size()) return buttons[bi].rect;
+		return RectF{};
+	}
+	bool enabledOfIndex(int idx) const {
+		if (idx == 0) return true;
+		if (idx == 1) return true;
+		const int bi = idx - 2;
+		if (bi >= 0 && bi < (int)buttons.size()) return buttons[bi].enabled;
+		return false;
+	}
 
 public:
 	using App::Scene::Scene;
 
 	Select(const InitData& init) : App::Scene(init) {
-	AudioAsset::Register(U"UIenterSE", U"Assets/UIenterSE.mp3");
-	AudioAsset::Register(U"UIselectSE", U"Assets/UIselectSE.mp3");
+		AudioAsset::Register(U"UIenterSE", U"Assets/UIenterSE.mp3");
+		AudioAsset(U"UIenterSE").setVolume(0.5);
+		AudioAsset::Register(U"UIselectSE", U"Assets/UIselectSE.mp3");
 
-		// 3行×4列で12個配置
-		const int cols = 4, rows = 3;
-		const double w = 160, h = 46;
-		const double gapX = 40, gapY = 60;
-		const double startX = 140;
-		const double startY = 160;
+		entries = {
+			{ U"1. 森林",       true,  State::Stage1   },
+			{ U"2. 心臓",       true,  State::Stage2   },
+			{ U"3. シャー芯",   true,  State::Stage3   },
+			{ U"4. 信号",       true,  State::Stage4   },
+			{ U"5. 真珠（準備中）", false, none            },
+			{ U"6. 分身（準備中）", false, none            },
+			{ U"7. 深海（準備中）", false, none            },
+			{ U"8. 診察（準備中）", false, none            },
+			{ U"9. 写真（準備中）", false, none            },
+			{ U"10. 振動（準備中）",false, none            },
+			{ U"11. 神（準備中）",false, none            },
+			{ U"12. 寝室",      true,  State::StageLast },
+		};
+		loadStageNamesIfAny();
 
-		buttons.reserve(12);
-		for (int r = 0; r < rows; ++r) {
-			for (int c = 0; c < cols; ++c) {
-				const int idx = r * cols + c;
-				const RectF rect{ startX + c * (w + gapX), startY + r * (h + gapY), w, h };
-				String label = (idx < 11) ? (U"ステージ {}"_fmt(idx + 1)) : U"ラスト";
-				buttons << UIButton{ rect, label };
-			}
+		// 戻るボタンを中央上に
+		{
+			const double w = backBtn.rect.w, h = backBtn.rect.h;
+			backBtn.rect = RectF{ Arg::center = Vec2{ Scene::CenterF().x, 37 }, w, h };
+		}
+
+		// ステージボタン（1行3）
+		const double totalW = kCols * btnW + (kCols - 1) * gapX;
+		startX = (Scene::Width() - totalW) * 0.5;
+
+		buttons.reserve(entries.size());
+		for (int i = 0; i < (int)entries.size(); ++i) {
+			const int r = i / kCols;
+			const int c = i % kCols;
+			const RectF rect{ startX + c * (btnW + gapX), startY + r * (btnH + gapY), btnW, btnH };
+			buttons << UIButton{ rect, entries[i].name };
 		}
 	}
 
 	void update() override {
+		Scene::SetBackground(ColorF{ 0.95, 0.98, 1.0 });
+
+		// enabled 更新
 		const int unlocked = getData().unlocked;
 		for (int i = 0; i < (int)buttons.size(); ++i) {
-			buttons[i].enabled = ((i + 1) <= unlocked);
+			const bool impl = entries[i].available && entries[i].target.has_value();
+			const bool unlockedGate = ((i + 1) <= unlocked);
+			buttons[i].text = entries[i].name;
+			buttons[i].enabled = (impl && unlockedGate);
 		}
 
-		for (int i = 0; i < (int)buttons.size(); ++i) {
-			if (buttons[i].drawAndCheck(font)) {
-				if (i < 11) {
-					StopAllAudio();
-					changeScene(static_cast<State>(static_cast<int>(State::Stage1) + i), 0.2s);
+		// === マウスにホバーがあればキーボード選択を解除 ===
+		bool anyHover = deleteBtn.rect.mouseOver() || backBtn.rect.mouseOver();
+		if (!anyHover) {
+			for (const auto& b : buttons) { if (b.rect.mouseOver()) { anyHover = true; break; } }
+		}
+		if (anyHover) focus = -1;
+
+		// === キー操作 ===
+		{
+			auto ensureFocus = [&]() { if (focus == -1) focus = 0; }; // 解除中に矢印が押されたら「戻る」から再開
+
+			const int prev = focus;
+			// 左右（データ削除 ↔ 戻る は左右どちらでも移動できる仕様のまま）
+			if (KeyLeft.down()) {
+				ensureFocus();
+				if (focus == 0) focus = 1;
+				else if (focus >= 2 && (focus - 2) % kCols != 0) focus -= 1;
+				else if (focus == 1) focus = 0;
+			}
+			if (KeyRight.down()) {
+				ensureFocus();
+				if (focus == 1) focus = 0;           // データ削除 -> 戻る
+				else if (focus == 0) focus = 1;      // 戻る -> データ削除
+				else if (focus >= 2 && (focus - 2) % kCols != kCols - 1 && (focus - 1) < (int)(buttons.size() + 1)) focus += 1;
+			}
+			// 上下
+			if (KeyUp.down()) {
+				ensureFocus();
+				if (focus >= 2) {
+					const int bi = focus - 2;
+					const int row = bi / kCols;
+					const int col = bi % kCols;
+					if (row == 0) focus = (col == 1 ? 0 : 1);
+					else focus -= kCols;
 				}
-				else {
-					StopAllAudio();
-					changeScene(State::StageLast, 0.2s);
+			}
+			if (KeyDown.down()) {
+				ensureFocus();
+				if (focus <= 1) {
+					const int col = (focus == 0 ? 1 : 0); // back->中列, delete->左列
+					const int ni = 2 + col;
+					if (ni < 2 + (int)buttons.size()) focus = ni;
 				}
-				break;
+				else if (focus + kCols < 2 + (int)buttons.size()) {
+					focus += kCols;
+				}
+			}
+			if (focus != prev && focus != -1) AudioAsset(U"UIselectSE").play();
+
+			// 決定（解除中は無視）
+			if ((KeyEnter.down() || KeyK.down() || KeySpace.down()) && focus != -1) {
+				AudioAsset(U"UIenterSE").play();
+				if (focus == 0) { // 戻る
+					StopAllAudio();
+					changeScene(State::Title, 0.2s);
+					return;
+				}
+				if (focus == 1) { // データ削除
+					TextWriter writer{ U"Assets/SaveData.txt" };
+					if (writer) writer.writeln(U"1");
+					getData().unlocked = 1;
+					StopAllAudio();
+					changeScene(State::Title, 0.2s);
+					return;
+				}
+				const int bi = focus - 2;
+				if (bi >= 0 && bi < (int)entries.size()) {
+					if (entries[bi].available && entries[bi].target) {
+						StopAllAudio();
+						changeScene(*entries[bi].target, 0.2s);
+						return;
+					}
+				}
 			}
 		}
 
-		if (KeyEscape.down())
-		{
+		// === マウス操作（従来） ===
+		for (int i = 0; i < (int)buttons.size(); ++i) {
+			if (buttons[i].drawAndCheck(font)) {
+				if (entries[i].available && entries[i].target) {
+					StopAllAudio();
+					changeScene(*entries[i].target, 0.2s);
+				}
+				return;
+			}
+		}
+		if (deleteBtn.drawAndCheck(font)) {
+			TextWriter writer{ U"Assets/SaveData.txt" };
+			if (writer) writer.writeln(U"1");
+			getData().unlocked = 1;
+			StopAllAudio();
+			changeScene(State::Title, 0.2s);
+			return;
+		}
+		if (backBtn.drawAndCheck(font)) {
+			StopAllAudio();
+			changeScene(State::Title, 0.2s);
+			return;
+		}
+
+		if (KeyEscape.down()) {
 			StopAllAudio();
 			changeScene(State::Title, 0.2s);
 		}
 	}
 
 	void draw() const override {
-		Scene::SetBackground(ColorF{ 0.95, 0.98, 1.0 });
-		title(U"ステージセレクト").draw(20, 16, ColorF{ 0.15 });
+		// 上部
+		deleteBtn.draw(font);
+		backBtn.draw(font);
+		// ステージ
 		for (const auto& b : buttons) b.draw(font);
+		// キーボードフォーカスは focus!=-1 かつ有効時のみ
+		if (focus != -1 && enabledOfIndex(focus)) {
+			drawFocusOverlay(rectOfIndex(focus));
+		}
 	}
 };
+
 
 //============================= ステージ基底 =============================
 class StageBase : public App::Scene {
@@ -615,7 +798,6 @@ public:
 		colliders = MakeLevelColliders(sceneSize, platforms);
 		player = Player{}; player.pos = Vec2{ 80, 540 };
 
-		// 木の横一列スロット
 		const double cx = sceneSize.x * 0.5;
 		const double y = 210;
 		const double step = 48;
@@ -904,7 +1086,7 @@ public:
 		}
 
 		if (player.jumpedThisFrame) {
-			if (isOnBeatFrames(9)) {
+			if (isOnBeatFrames(20)) {
 				combo = Min(combo + 1, kGoalCombo);
 				if (combo >= kGoalCombo) doorAppeared = true;
 			}
@@ -976,7 +1158,7 @@ public:
 				}
 			}
 			const double t = Scene::Time();
-			const double p = (t * heartHz) - Math::Floor(t * heartHz); // 0..1
+			const double p = (t * heartHz) - Math::Floor(t * heartHz);
 			const double x = base.x + (w + gap) * (kGoalCombo * Math::Clamp(p, 0.0, 1.0));
 			Line{ x, base.y - 6, x, base.y + h + 6 }.draw(2, ColorF{ 0.8,0.3,0.4,0.25 });
 		}
@@ -986,8 +1168,6 @@ public:
 			.draw(ColorF{ 0.85,1.0,0.9,0.35 });
 		}
 		player.draw();
-
-		uiCommon(U"ステージ 2");
 	}
 
 	void onClear() override {
@@ -1010,7 +1190,7 @@ public:
 	using StageBase::StageBase;
 
 private:
-	// ===== 右向きシャーペン（本体=固定長 / 芯=段階的に伸びる） =====
+	// ===== シャーペン =====
 	struct PencilBridge {
 		Vec2   origin;              // 左端（床yは origin.y）
 		double bodyLen = 160;     // 本体の固定長（スタート島の幅）
@@ -1152,8 +1332,8 @@ private:
 	Vec2         startPos;
 
 	// 折れロジック調整
-	double breakMinFall = 3.0;     // 落差しきい値（px）
-	double breakMinVy = 80.0;   // 着地直前の下向き速度しきい値
+	double breakMinFall = 1.0;     // 落差しきい値（px）
+	double breakMinVy = 20.0;   // 着地直前の下向き速度しきい値
 	double leadRootSafeLen = 24.0; // 口金直後は安全帯（ここでは折れない）
 
 	// 状態
@@ -1217,11 +1397,11 @@ public:
 		}
 
 		// SE
-		AudioAsset::Register(U"BreakSE", U"Assets/pencilBreakSE.mp3"); 
+		AudioAsset::Register(U"BreakSE", U"Assets/pencilBreakSE.mp3");
 		AudioAsset(U"Break").setVolume(1.5);
-		AudioAsset::Register(U"PushSE", U"Assets/pushPencilSE.mp3"); 
+		AudioAsset::Register(U"PushSE", U"Assets/pushPencilSE.mp3");
 		AudioAsset(U"PushSE").setVolume(1.5);
-		AudioAsset::Register(U"clearSE", U"Assets/clearSE.mp3"); 
+		AudioAsset::Register(U"clearSE", U"Assets/clearSE.mp3");
 		AudioAsset(U"clearSE").setVolume(0.9);
 	}
 
@@ -1369,273 +1549,515 @@ public:
 	Stage4(const InitData& init)
 		: StageBase(init)
 	{
-		// ← これを追加
-		platforms = { RectF{ 0, 580, 960, 60 } };                 // 地面
-		colliders = MakeLevelColliders(sceneSize, platforms);     // 画面端の壁も追加
-		player = Player{};                                        // プレイヤー初期化
-		player.pos = startPos;                                    // 開始位置に置く
+		platforms = {
+			RectF{ 0, crosswalk.y - 15, (double)sceneSize.x, (double)sceneSize.y - (crosswalk.y - 15) }
+		};
+		colliders = MakeLevelColliders(sceneSize, platforms);
+
+		player = Player{};
+		player.pos = Vec2{ 120, 500 };
+
+		goalDoor = RectF{ (double)sceneSize.x - 70.0, 470, 60, 80 };
+
+		AudioAsset::Register(U"carSE", U"Assets/carSE.mp3");
+		AudioAsset(U"carSE").setVolume(0.8);
+		AudioAsset::Register(U"car2SE", U"Assets/car2SE.mp3");
+		AudioAsset(U"car2SE").setVolume(0.8);
+		AudioAsset::Register(U"car3SE", U"Assets/car3SE.mp3");
+		AudioAsset(U"car3SE").setVolume(0.8);
+		AudioAsset::Register(U"green2SE", U"Assets/green2SE.mp3");
+
+		AudioAsset::Register(U"stage4BGM", U"Assets/stage4BGM.mp3");
+		AudioAsset(U"stage4BGM").setLoop(true);
+		AudioAsset(U"stage4BGM").setVolume(0.25);
+		AudioAsset(U"stage4BGM").play();
 	}
 
 private:
-	//============== ルール状態 ==============
 	enum class Light { Red, Green };
 
-	struct Car {
-		RectF  body{ 0, 0, 64, 28 };
-		double speed = 520.0;   // 速さ
-		int    dir = +1;      // +1: 左→右,  -1: 右→左
+	bool wasOnCrosswalk = false;
+
+	//============== 道路 ==============
+	static constexpr double roadYBottom = 580.0;
+	static constexpr double roadYTop = 360.0;
+
+	static constexpr double walkLeft = 220.0;
+	static constexpr double walkRight = 70.0;
+
+	static constexpr double topScale = 0.42;
+
+	double W() const { return (double)Scene::Width(); }
+	double H() const { return (double)Scene::Height(); }
+
+	double vanishCX() const { return W() * 0.54; }
+
+	double roadLeftBottomX()  const { return walkLeft; }
+	double roadRightBottomX() const { return W() - walkRight; }
+
+	double roadLeftTop()  const {
+		const double bottomW = roadRightBottomX() - roadLeftBottomX();
+		const double topHalf = (bottomW * topScale) * 0.5;
+		return vanishCX() - topHalf;
+	}
+	double roadRightTop() const {
+		const double bottomW = roadRightBottomX() - roadLeftBottomX();
+		const double topHalf = (bottomW * topScale) * 0.5;
+		return vanishCX() + topHalf;
+	}
+
+	double edgeLeftX(double y)  const {
+		const double t = (y - roadYTop) / (roadYBottom - roadYTop);
+		return Math::Lerp(roadLeftTop(), roadLeftBottomX(), t);
+	}
+	double edgeRightX(double y) const {
+		const double t = (y - roadYTop) / (roadYBottom - roadYTop);
+		return Math::Lerp(roadRightTop(), roadRightBottomX(), t);
+	}
+
+	RectF crossTrigger{ 270, 510, 550, 100 }; // {X, Y, Width, Height}
+
+	bool wasInCrossTrigger = false;
+
+	bool   controlLocked = false;
+	double respawnTimer = 0.0;
+
+	bool overlapsWorld(const RectF& r) const {
+		for (const auto& c : colliders) {
+			if (r.intersects(c)) return true;
+		}
+		return false;
+	}
+
+	Light prevLight = Light::Red;
+
+	bool isInCrossTrigger(const RectF& r) const {
+		return r.intersects(crossTrigger);
+	}
+
+
+	//============== 車 ==============
+	struct DepthCar {
+		double y = roadYTop - 60.0;
+		double speed = 780.0;
 		bool   active = false;
 
-		void spawnFromLeft(double y) { body.pos = { -120, y };              dir = +1; active = true; }
-		void spawnFromRight(double y) { body.pos = { Scene::Width() + 120, y }; dir = -1; active = true; }
+		double widthFrac = 0.38;
+		double baseHeightBottom = 120.0;
 
+		double laneT = 0.33;
+
+		std::function<double(double)> edgeL;
+		std::function<double(double)> edgeR;
+
+		void spawnFar() {
+			y = roadYTop - 80.0;
+			active = true;
+		}
 		void update(double dt) {
 			if (!active) return;
-			body.x += (dir * speed * dt);
+			y += speed * dt;
+			if (y > roadYBottom + 220.0) active = false;
+		}
 
-			// 画面外判定（right()/bottom()は使わない）
-			if (dir == -1) {
-				// 右→左：右端 (x+w) が左に抜けたら消す
-				if ((body.x + body.w) < -100) active = false;
-			}
-			else {
-				// 左→右：左端 x が画面右を越えたら消す
-				if (body.x > (Scene::Width() + 100)) active = false;
-			}
+		// 遠近補正：道路Y→画面Y
+		double projectY(double roadY) const {
+			const double t = (roadY - roadYTop) / (roadYBottom - roadYTop);
+			return Math::Lerp(roadYTop, roadYBottom, t);
+		}
+
+		// 投影矩形
+		RectF projectedRect() const {
+			const double screenY = projectY(y);
+
+			const double l = edgeL(screenY);
+			const double r = edgeR(screenY);
+			const double wRoad = Max(0.0, r - l);
+
+			const double w = wRoad * widthFrac;
+
+			const double cx = Math::Lerp(l, r, laneT);
+
+			const double depth = Saturate((screenY - roadYTop) / (roadYBottom - roadYTop));
+			const double h = Max(12.0, baseHeightBottom * Math::Lerp(0.35, 1.0, depth));
+
+			const double top = screenY - h;
+			return RectF{ cx - w * 0.5, top, w, h };
 		}
 
 		void draw() const {
 			if (!active) return;
-			const RectF r = body;
-			// 車ボディ
-			r.stretched(1).rounded(6).draw(ColorF(0.15));
-			RectF(r.x + 6, r.y + 4, r.w - 12, r.h - 10).rounded(6).draw(ColorF(0.9));
-			// タイヤ（y+h を使用）
-			Circle(r.x + r.w * 0.25, r.y + r.h, 6).draw(ColorF(0.1));
-			Circle(r.x + r.w * 0.75, r.y + r.h, 6).draw(ColorF(0.1));
+			const RectF r = projectedRect();
+			const double w = r.w, h = r.h;
+
+			// 影
+			Ellipse{ r.center().movedBy(0, h * 0.55), w * 0.42, h * 0.22 }
+			.draw(ColorF(0, 0, 0, 0.08));
+
+			// ==== ボディ（正面）====
+			// ロアボディ
+			RoundRect lower = RectF(r.x + 4, r.y + h * 0.65, w - 8, h * 0.30).rounded(10);
+			lower.draw(ColorF(0.07));
+
+			// キャビン
+			RoundRect cab = RectF(r.x + w * 0.06, r.y + h * 0.05, w * 0.88, h * 0.62).rounded(12);
+			cab.draw(ColorF(0.18));
+			RectF(cab.rect.x + 6, cab.rect.y + 6, cab.rect.w - 12, cab.rect.h - 12)
+				.rounded(10).draw(ColorF(0.93));
+
+			// フロントガラス
+			RoundRect windshield = RectF(r.x + w * 0.20, r.y + h * 0.10, w * 0.60, h * 0.28).rounded(10);
+			windshield.draw(ColorF(0.09, 0.12, 0.16, 0.85));
+			// 反射ハイライト
+			Quad(
+				windshield.rect.tl().movedBy(6, 6),
+				windshield.rect.tr().movedBy(-18, 4),
+				windshield.rect.tr().movedBy(-8, windshield.rect.h * 0.40),
+				windshield.rect.tl().movedBy(10, windshield.rect.h * 0.45)
+			).draw(ColorF(1, 1, 1, 0.06));
+
+			// ボンネットのハイライト
+			RoundRect hood = RectF(r.x + w * 0.10, r.y + h * 0.48, w * 0.80, h * 0.12).rounded(8);
+			hood.draw(ColorF(1, 1, 1, 0.08));
+
+			// グリル
+			RoundRect grill = RectF(r.x + w * 0.22, r.y + h * 0.66, w * 0.56, h * 0.08).rounded(6);
+			grill.draw(ColorF(0.06));
+
 			// ヘッドライト
-			const Vec2 hl = (dir == +1) ? Vec2(r.x + r.w - 6, r.y + 10) : Vec2(r.x + 6, r.y + 10);
-			Triangle(hl, 10, (dir == +1 ? -90_deg : +90_deg)).draw(ColorF(1.0, 0.9));
+			const double lampW = w * 0.12;
+			const double lampH = h * 0.10;
+			RoundRect lampL = RectF(r.x + w * 0.06, r.y + h * 0.63, lampW, lampH).rounded(6);
+			RoundRect lampR = RectF(r.x + w * 0.82, r.y + h * 0.63, lampW, lampH).rounded(6);
+			lampL.draw(ColorF(1.0, 0.95, 0.75, 0.95));
+			lampR.draw(ColorF(1.0, 0.95, 0.75, 0.95));
+
+			// フォグ
+			RoundRect fogL = RectF(r.x + w * 0.18, r.y + h * 0.74, w * 0.16, h * 0.06).rounded(4);
+			RoundRect fogR = RectF(r.x + w * 0.66, r.y + h * 0.74, w * 0.16, h * 0.06).rounded(4);
+			fogL.draw(ColorF(0.9, 0.95, 1.0, 0.18));
+			fogR.draw(ColorF(0.9, 0.95, 1.0, 0.18));
+
+			// バンパー下のスリット
+			RectF(r.x + w * 0.28, r.y + h * 0.73, w * 0.44, h * 0.035).rounded(3).draw(ColorF(0.1));
+
+			// タイヤ
+			const double wheelR = h * 0.16;
+			Circle(r.x + w * 0.18, r.y + h * 0.98, wheelR).draw(ColorF(0.05));
+			Circle(r.x + w * 0.82, r.y + h * 0.98, wheelR).draw(ColorF(0.05));
 		}
 	};
+
 
 	//============== 配置 ==============
 	const Vec2  startPos{ 120, 540 };
 	const RectF crosswalk{ 360, 560, 240, 24 }; // 横断歩道
-	const RectF sensor{ 168, 520, 28, 44 };     // センサー（一定時間で青）
-	const RectF goalDoor{ 820, 500, 60, 80 };   // クリア扉
-	const double roadY = crosswalk.y - 8;       // 車レーンのY
+	const RectF sensor{ 176, 520, 1, 44 };      // センサー
+	RectF goalDoor{ 0, 450, 60, 80 };
 
 	//============== 信号 / タイミング ==============
 	Light  light = Light::Red;
-	double senseHold = 0.0;                     // センサー滞在時間蓄積
-	static constexpr double kHoldToGreen = 2.0; // 青にするのに必要な滞在秒
-	static constexpr double kGreenWindow = 6.0; // 青の持続秒
+	double senseHold = 0.0;
+	static constexpr double kHoldToGreen = 2.0; // 青に必要な滞在秒
+	static constexpr double kGreenWindow = 3.5; // 青の持続秒
 	double greenRemain = 0.0;
 	bool   goalAppeared = false;
 
-	//============== 車制御 ==============
-	Car    car;
+	//============== 車制御（奥→手前） ==============
+	DepthCar carA{}, carB{};  
 	bool   carQueued = false;
-	double carSpawnDelay = 0.25;
+	double carSpawnDelay = 0.18;
 	double carSpawnT = 0.0;
 
-	//============== ヘルパ（仮想関数にせずローカルで完結） ==============
-	RectF playerRect() { return RectF{ player.pos, player.size }; }
-	void  warpPlayerToStart() { player.pos = startPos; player.vel = Vec2{ 0, 0 }; }
+	//============== ヘルパ ==============
+	RectF playerRect() const { return RectF{ player.pos, player.size }; }
+	void warpPlayerToStart() {
+		const double safeY = groundY - player.size.y - 2.0;
+		player.pos = Vec2{ startPos.x, Min(startPos.y, safeY) };
+		player.vel = Vec2{ 0, 0 };
+
+		for (int i = 0; i < 10 && overlapsWorld(RectF{ player.pos, player.size }); ++i) {
+			player.pos.y -= 2.0;
+		}
+	}
 
 	void resetAfterHit() {
-		car.active = false;
+		carA.active = false;
+		carB.active = false;
 		carQueued = false;
 		carSpawnT = 0.0;
 		warpPlayerToStart();
+		controlLocked = true;
+		respawnTimer = 0.5;
+		knocked = false;
+		wasOnCrosswalk = false;
+		senseHold = 0.0;
 	}
 
-	// --- ノックバック（轢かれた演出） ---
+	// 轢かれ演出
 	bool  knocked = false;
 	Vec2  knockVel{ 0, 0 };
 	static constexpr double gravityY = 1600.0;
-	static constexpr double groundY = 560.0;  // 着地ライン（道路の上）
+	static constexpr double groundY = 560.0;
+
+	void drawBackgroundPerspective() const;
 
 public:
 	void update() override {
-		StageBase::update();
 		const double dt = Scene::DeltaTime();
-		const RectF prect = playerRect();
 
-		// --- センサー判定：滞在で青化 ---
-		if (prect.intersects(sensor)) {
-			senseHold = Min(senseHold + dt, kHoldToGreen);
-			if (senseHold >= kHoldToGreen && light == Light::Red) {
-				light = Light::Green;
-				greenRemain = kGreenWindow;
-				carQueued = false; // 違反キューを消す
-				// AudioAsset(U"switch").play();
-			}
+		// リスポーン凍結
+		if (respawnTimer > 0.0) {
+			respawnTimer -= dt;
+			if (respawnTimer <= 0.0) { controlLocked = false; respawnTimer = 0.0; }
 		}
-		else {
-			// 少しだけ減衰（完全に0には戻りづらい感覚）
-			senseHold = Max(0.0, senseHold - dt * 0.7);
-		}
+		if (!controlLocked) { StageBase::update(); }
 
-		// --- 青の残り時間 ---
-		if (light == Light::Green) {
-			greenRemain -= dt;
-			if (greenRemain <= 0.0) {
-				light = Light::Red;
-				senseHold = 0.0;
-			}
-		}
+		const RectF prect{ player.pos, player.size };
 
-		// --- 赤で横断 → 車出現キュー ---
-		if (light == Light::Red && prect.intersects(crosswalk) && (!car.active) && (!carQueued)) {
-			carQueued = true;
-			carSpawnT = carSpawnDelay;
-		}
+		const bool inCross = isInCrossTrigger(prect);
+		const bool enteredCrossThisFrame = (inCross && !wasInCrossTrigger);
+		wasInCrossTrigger = inCross;
 
-		// --- 車スポーン ---
-		if (carQueued) {
-			carSpawnT -= dt;
-			if (carSpawnT <= 0.0) {
-				const double cwCenterX = crosswalk.x + crosswalk.w * 0.5;
-				const bool spawnFromRight = (prect.center().x > cwCenterX);
-				if (spawnFromRight) car.spawnFromRight(roadY);
-				else                car.spawnFromLeft(roadY);
-				carQueued = false;
-			}
-		}
+		const Light before = light;
 
-		car.update(dt);
+		// 車の投影関数とレーン
+		carA.edgeL = [this](double y) { return this->edgeLeftX(y); };
+		carA.edgeR = [this](double y) { return this->edgeRightX(y); };
+		carA.laneT = 0.33;
+		carB.edgeL = [this](double y) { return this->edgeLeftX(y); };
+		carB.edgeR = [this](double y) { return this->edgeRightX(y); };
+		carB.laneT = 0.67;
 
-		// --- 衝突
-		if (!knocked && car.active && prect.intersects(car.body)) {
-			// ノックバック開始：車の進行方向に大きく、上にも跳ねる
-			knocked = true;
-			knockVel = Vec2(car.dir * 320.0, -420.0);
-			// ここでは即リセットしない（車が画面外に抜けるまで待つ）
-		}
-
-		// --- クリア条件：青のあいだに横断し右側へ抜ける ---
+		// --- センサー：滞在で青化 ---
 		{
-			const double cwRight = crosswalk.x + crosswalk.w; // right() 不使用
-			if (!goalAppeared && light == Light::Green) {
-				if (prect.x > (cwRight + 6.0)) {
-					goalAppeared = true;
+			const double px = prect.center().x;
+			const double sx = sensor.center().x;
+			const double distX = Abs(px - sx);
+			constexpr double kSensorThreshold = 3.5;
+
+			if (distX < kSensorThreshold
+				&& prect.y < sensor.y + sensor.h
+				&& prect.y + prect.h > sensor.y) {
+				senseHold = Min(senseHold + dt, kHoldToGreen);
+				if (senseHold >= kHoldToGreen && light == Light::Red) {
+					light = Light::Green;
+					greenRemain = kGreenWindow;
+					AudioAsset(U"green2SE").setVolume(0.3);
+					AudioAsset(U"green2SE").play();
 				}
 			}
-		}
-
-		// --- 扉入場で次シーンへ ---
-		if (goalAppeared && prect.intersects(goalDoor)) {
-			// getData().unlocked = Max(getData().unlocked, 5);
-			changeScene(State::StageLast, 0.3s);
-		}
-
-		// === ノックバック挙動 ===
-		if (knocked) {
-			// 簡易物理（重力のみ・壁当たりは無し）
-			knockVel.y += gravityY * dt;
-			player.pos += knockVel * dt;
-
-			// 地面で止める（道路ラインより下に行かない）
-			if (player.pos.y + player.size.y > groundY) {
-				player.pos.y = groundY - player.size.y;
-				knockVel.y = 0.0;
-			}
-
-			// 車が画面外に抜けたら（= active が false になったら）リセット
-			if (!car.active) {
-				knocked = false;
-				resetAfterHit();  // ここでワープ＆各種フラグ初期化
-			}
-		}
-	}
-
-	void draw() const override {
-		// 道路
-		RectF(0, 580, Scene::Width(), 60).draw(ColorF(0.12));
-
-		// ===== 横断歩道（くっきり白線） =====
-		{
-			const double stripeW = 22.0;           // 白線の幅
-			const double stripeGap = 14.0;           // 白と白の間隔
-			const int    count = (int)((crosswalk.w + stripeGap) / (stripeW + stripeGap));
-
-			// 枠（うっすら）
-			RectF(crosswalk.x, crosswalk.y, crosswalk.w, crosswalk.h)
-				.draw(ColorF(0.92))                  // 白地
-				.drawFrame(2.0, 0.0, ColorF(0, 0, 0, 0.18));
-
-			// 白線を等間隔で敷く（乱数なし）
-			double x = crosswalk.x + stripeGap * 0.5;
-			for (int i = 0; i < count; ++i) {
-				const double w = Min(stripeW, crosswalk.x + crosswalk.w - x);
-				if (w <= 0) break;
-				RectF(x, crosswalk.y, w, crosswalk.h).draw(Palette::White);
-				x += (stripeW + stripeGap);
-			}
-		}
-
-			// ===== 上部 HUD ゲージ（大きめ） =====
-		{
-			// バー位置とサイズ
-			const Vec2 base = Vec2{ Scene::CenterF().x - 180, 24 };
-			const double W = 360, H = 16;
-
-			// 背景と枠
-			RectF(base.x, base.y, W, H).draw(ColorF(0.95, 0.97, 1.0, 0.85));
-			RectF(base.x, base.y, W, H).drawFrame(2, 0, ColorF(0.25, 0.3, 0.35, 0.7));
-
-			if (light == Light::Red) {
-				// センサー滞在の充電ゲージ
-				const double p = (kHoldToGreen > 0 ? (senseHold / kHoldToGreen) : 1.0);
-				RectF(base.x, base.y, W * Saturate(p), H).draw(ColorF(0.35, 0.85, 0.75, 0.9));
-				FontAsset(U"ui")(U"センサー充電中").drawAt(base.movedBy(W * 0.5, -14), ColorF(0.25));
-			}
 			else {
-				// 青信号の残り時間ゲージ（右から減る）
-				const double p = Saturate(greenRemain / kGreenWindow);
-				RectF(base.x, base.y, W * p, H).draw(ColorF(0.35, 1.0, 0.45, 0.9));
-				FontAsset(U"ui")(Format(U"青信号 {:.1f}s", greenRemain))
-					.drawAt(base.movedBy(W * 0.5, -14), ColorF(0.25));
+				senseHold = Max(0.0, senseHold - dt * 0.7);
 			}
 		}
 
-		// 信号
-		{
-			const double baseX = crosswalk.x + crosswalk.w * 0.5;
-			const double baseY = crosswalk.y - 70.0;
-			RectF(baseX - 10.0, baseY, 20.0, 100.0).draw(ColorF(0.2));
-			const Circle red(baseX, baseY + 10.0, 10.0);
-			const Circle green(baseX, baseY + 40.0, 10.0);
-			red.draw((light == Light::Red) ? ColorF(1.0, 0.25, 0.25) : ColorF(0.3, 0.1, 0.1));
-			green.draw((light == Light::Green) ? ColorF(0.35, 1.0, 0.45) : ColorF(0.1, 0.25, 0.1));
-			if (light == Light::Green) {
-				FontAsset(U"ui")(Format(U"{:.1f}", greenRemain))
-					.drawAt(baseX, baseY + 66.0, ColorF(0.9));
+		// --- 青の残り ---
+		if (light == Light::Green) {
+			greenRemain -= dt;
+			if (greenRemain <= 0.0) { light = Light::Red; senseHold = 0.0; }
+		}
+
+		if (light == Light::Red && enteredCrossThisFrame) {
+			if (!carA.active && !carB.active) {
+				carA.spawnFar(); carB.spawnFar();
+				AudioAsset(U"car3SE").play();
+			}
+		}
+
+		const bool turnedToRedThisFrame = (before == Light::Green && light == Light::Red);
+		if (turnedToRedThisFrame && inCross) {
+			if (!carA.active && !carB.active) {
+				carA.spawnFar(); carB.spawnFar();
+				AudioAsset(U"car3SE").play();
 			}
 		}
 
 		// 車
-		car.draw();
+		carA.update(dt);
+		carB.update(dt);
 
-		// 扉
-		if (goalAppeared) {
-			// 白い本体
+		// 衝突
+		if (!knocked && (carA.active || carB.active)) {
+			if ((carA.active && carA.projectedRect().intersects(prect)) ||
+				(carB.active && carB.projectedRect().intersects(prect))) {
+				knocked = true; controlLocked = true; player.vel = Vec2{ 0,0 };
+				knockVel = Vec2(Random(-120.0, 120.0), -560.0);
+				StopAllAudio();
+				AudioAsset(U"carSE").play();
+				AudioAsset(U"car2SE").play();
+			}
+		}
+
+		// ゴール判定
+		if (!controlLocked && prect.intersects(goalDoor)) {
+			StopAllAudio();
+			AudioAsset(U"stage4BGM").stop();
+			changeScene(State::StageLast, 0.3s);
+		}
+
+		// ノックバック物理
+		if (knocked) {
+			knockVel.y += gravityY * dt;
+			player.pos += knockVel * dt;
+			if (player.pos.y + player.size.y > groundY) {
+				player.pos.y = groundY - player.size.y; knockVel.y = 0.0;
+			}
+			if (!carA.active && !carB.active) {
+				resetAfterHit();
+				return;
+			}
+		}
+		if (KeyEscape.down()) {
+			StopAllAudio();
+			AudioAsset(U"stage4BGM").stop();
+			return;
+		}
+	}
+
+	void draw() const override {
+		drawBackgroundPerspective();
+
+		// 上部 ゲージ
+		{
+			const Vec2 base = Vec2{ Scene::CenterF().x - 180, 24 };
+			const double Wb = 360, Hb = 16;
+
+			RectF(base.x, base.y, Wb, Hb).draw(ColorF(0.95, 0.97, 1.0, 0.85));
+			RectF(base.x, base.y, Wb, Hb).drawFrame(2, 0, ColorF(0.25, 0.3, 0.35, 0.7));
+
+			if (light == Light::Red) {
+				const double p = (kHoldToGreen > 0 ? (senseHold / kHoldToGreen) : 1.0);
+				RectF(base.x, base.y, Wb * Saturate(p), Hb).draw(ColorF(0.35, 0.85, 0.75, 0.9));
+				FontAsset(U"ui")(U"センサー充電中").drawAt(base.movedBy(Wb * 0.5, -14), ColorF(0.25));
+			}
+			else {
+				const double p = Saturate(greenRemain / kGreenWindow);
+				RectF(base.x, base.y, Wb * p, Hb).draw(ColorF(0.35, 1.0, 0.45, 0.9));
+				FontAsset(U"ui")(Format(U"青信号 {:.1f}s", greenRemain))
+					.drawAt(base.movedBy(Wb * 0.5, -14), ColorF(0.25));
+			}
+		}
+
+		// 信号機（右歩道側）
+		{
+			const double baseX = Scene::Width() - 120.0;
+			const double baseY = crosswalk.y - 20.0;
+			const Vec2 poleBase{ baseX, baseY };
+
+			RectF(poleBase.movedBy(-4, -120), 8, 140).draw(ColorF(0.1, 0.1, 0.1));
+			const RectF box = RectF(poleBase.movedBy(-44, -180), 40, 90);
+			box.rounded(4).draw(ColorF(0.08, 0.08, 0.08));
+
+			const double r = 10.0;
+			const Vec2 redPos = box.center().movedBy(0, -24);
+			const Vec2 yellowPos = box.center();
+			const Vec2 greenPos = box.center().movedBy(0, +24);
+
+			const ColorF redOn(1.0, 0.25, 0.25), redOff(0.25, 0.08, 0.08);
+			const ColorF greenOn(0.35, 1.0, 0.45), greenOff(0.05, 0.25, 0.08);
+
+			Circle(redPos, r).draw((light == Light::Red) ? redOn : redOff);
+			Circle(yellowPos, r).draw(ColorF(0.15));
+			Circle(greenPos, r).draw((light == Light::Green) ? greenOn : greenOff);
+
+			if (light == Light::Red)   Circle(redPos, r * 1.8).draw(ColorF(1.0, 0.3, 0.3, 0.25));
+			if (light == Light::Green) Circle(greenPos, r * 1.8).draw(ColorF(0.4, 1.0, 0.5, 0.25));
+
+			if (light == Light::Green) {
+				FontAsset(U"ui")(Format(U"{:.1f}", greenRemain)).drawAt(poleBase.movedBy(-20, -200), ColorF(0.9));
+			}
+		}
+
+		carA.draw();
+		carB.draw();
+
+		{
 			goalDoor.draw(Palette::White);
-			// 緑フレーム
 			goalDoor.drawFrame(4, ColorF{ 0.15,0.5,0.25 });
-			// うっすら内側
 			RectF{ goalDoor.x + 6, goalDoor.y + 6, goalDoor.w - 12, goalDoor.h - 12 }
 			.draw(ColorF{ 0.85,1.0,0.9,0.35 });
 		}
 
-
 		player.draw();
 
+		// デバッグ用
+		//crossTrigger.draw(ColorF(0, 1, 0, 0.25));
 	}
+
 	void onClear() override {}
 };
+
+// 遠近背景（奥行きに沿った横断歩道）
+void Stage4::drawBackgroundPerspective() const {
+	const double Wv = W(), Hv = H();
+
+	// 歩道（左右の薄い台形）
+	const Quad sideL{
+		Vec2{0, roadYBottom}, Vec2{roadLeftBottomX(), roadYBottom},
+		Vec2{roadLeftTop(), roadYTop}, Vec2{0, roadYTop}
+	};
+	const Quad sideR{
+		Vec2{roadRightBottomX(), roadYBottom}, Vec2{Wv, roadYBottom},
+		Vec2{Wv, roadYTop}, Vec2{roadRightTop(), roadYTop}
+	};
+
+	// 背景空
+	RectF(0, 0, Wv, Hv).draw(Arg::top = ColorF(0.95, 0.98, 1.0), Arg::bottom = ColorF(0.92, 0.96, 0.98));
+	sideL.draw(ColorF(0.90, 0.92, 0.95));
+	sideR.draw(ColorF(0.90, 0.92, 0.95));
+
+	// 道路
+	const Quad road{
+		Vec2{roadLeftBottomX(),  roadYBottom},
+		Vec2{roadRightBottomX(), roadYBottom},
+		Vec2{roadRightTop(),     roadYTop},
+		Vec2{roadLeftTop(),      roadYTop}
+	};
+	road.draw(ColorF(0.14));
+
+	// 近景の横断歩道（遠近つきの白線）
+	const double bandTop = crosswalk.y - 40.0;
+	const double bandBottom = crosswalk.y + crosswalk.h + 8.0;
+	{
+		const int stripes = 8;
+		const double gapFrac = 1.0 / (stripes * 2.0);
+		for (int i = 0; i < stripes; ++i) {
+			const double f0 = (i * 2) * gapFrac;
+			const double f1 = (i * 2 + 1) * gapFrac;
+
+			const double yA = bandTop, yB = bandBottom;
+			const double lA = edgeLeftX(yA), rA = edgeRightX(yA);
+			const double lB = edgeLeftX(yB), rB = edgeRightX(yB);
+
+			const Vec2 A0{ Math::Lerp(lA, rA, f0), yA };
+			const Vec2 A1{ Math::Lerp(lA, rA, f1), yA };
+			const Vec2 B1{ Math::Lerp(lB, rB, f1), yB };
+			const Vec2 B0{ Math::Lerp(lB, rB, f0), yB };
+			Quad(A0, A1, B1, B0).draw(ColorF(0.96));
+		}
+	}
+
+	// 奥の横断歩道（飾り）
+	{
+		const double yT0 = roadYTop + 12, yT1 = yT0 + 12;
+		const double l0 = edgeLeftX(yT0), r0 = edgeRightX(yT0);
+		const double l1 = edgeLeftX(yT1), r1 = edgeRightX(yT1);
+		for (int i = 0; i < 6; ++i) {
+			const double f0 = (i * 2) / 12.0;
+			const double f1 = (i * 2 + 1) / 12.0;
+			Quad(
+				Vec2{ Math::Lerp(l0, r0, f0), yT0 }, Vec2{ Math::Lerp(l0, r0, f1), yT0 },
+				Vec2{ Math::Lerp(l1, r1, f1), yT1 }, Vec2{ Math::Lerp(l1, r1, f0), yT1 }
+			).draw(ColorF(0.92));
+		}
+	}
+
+	// 路肩の薄影
+	road.drawFrame(2, ColorF(0, 0, 0, 0.15));
+	sideL.drawFrame(1, ColorF(0, 0, 0, 0.06));
+	sideR.drawFrame(1, ColorF(0, 0, 0, 0.06));
+}
 
 //----------------------------- StageLast -----------------------------
 class StageLast : public StageBase {
@@ -1670,8 +2092,11 @@ public:
 		player.pos = Vec2{ 40, 540 };
 		goal = RectF{};
 
-		if (!AudioAsset::IsRegistered(U"clickSE"))
-			AudioAsset::Register(U"clickSE", U"Assets/clickSE.mp3");
+		AudioAsset::Register(U"clickSE", U"Assets/clickSE.mp3");
+		AudioAsset::Register(U"stageLastBGM", U"Assets/stageLastBGM.mp3");
+		AudioAsset(U"stageLastBGM").setLoop(true);
+		AudioAsset(U"stageLastBGM").setVolume(0.2);
+		AudioAsset(U"stageLastBGM").play();
 	}
 
 	void drawBackground() const override {
@@ -1747,6 +2172,12 @@ public:
 	void update() override {
 		const double dt = Scene::DeltaTime();
 
+		if (KeyEscape.down()) {
+			StopAllAudio();
+			changeScene(State::Title, 0.2s);
+			return;
+		}
+
 		if (!sitting) {
 			const bool left = (KeyA.pressed() || KeyLeft.pressed());
 			const bool right = (KeyD.pressed() || KeyRight.pressed());
@@ -1793,6 +2224,7 @@ public:
 			const RectF playerAABB{ player.pos, player.size };
 			if (playerAABB.intersects(chairArea)) {
 				sitting = true;
+				AudioAsset(U"stageLastBGM").stop();
 				player.vel = Vec2{ 0,0 };
 				player.pos = Vec2{ chairArea.x + 14, chairArea.y - player.size.y + 12 };
 
@@ -1834,7 +2266,6 @@ public:
 			player.draw();
 		}
 		else {
-			// 座る自然ポーズ
 			const Vec2 center = player.pos + Vec2{ player.size } / 2;
 
 			Ellipse{ center.movedBy(8, player.size.y / 2 + 12), 20, 7 }.draw(ColorF{ 0,0,0,0.12 });
@@ -1857,7 +2288,6 @@ public:
 			seatLip.drawFrame(1.5, ColorF{ 0.5,0.55,0.6,0.7 });
 		}
 
-		// 最前面レイヤ-（小物：当たり判定なし）
 		{
 			// ゴミ箱
 			const RectF bin{ 300, 576, 28, 24 };
@@ -1874,19 +2304,13 @@ public:
 						 pot.center().movedBy(-10 + 10 * i,-36) }.draw(4, ColorF{ 0.25,0.5,0.3,0.9 });
 			}
 
-			// ボックス
 			RectF{ 220, 588, 36, 14 }.draw(ColorF{ 0.82,0.84,0.88 });
 			RectF{ 220, 588, 36, 14 }.drawFrame(2, ColorF{ 0.5,0.55,0.6,0.6 });
 		}
-
-		// 着席後の暗転（即時）
 		if (sitting && blackedOut) {
 			RectF(Scene::Rect()).draw(ColorF{ 0,0,0 });
 		}
-
-		uiCommon(U"ラストステージ");
 	}
-
 	void onClear() override {}
 };
 
@@ -1907,8 +2331,7 @@ private:
 		U"END"
 	};
 
-	// 表示制御
-	int index = 0;                 // 現在のスライド
+	int index = 0;
 	Stopwatch sw{ StartImmediately::Yes };
 	const double fadeSec = 0.8;    // フェードイン/アウト時間
 	const double holdSec = 2.0;    // 文字がくっきり見える時間
@@ -1918,7 +2341,7 @@ private:
 		++index;
 		if (index >= (int)slides.size()) {
 			StopAllAudio();
-			changeScene(State::Title, 2.5s); // 完走→タイトルへ
+			changeScene(State::Title, 2.5s);
 		}
 		else {
 			sw.restart();
@@ -1927,24 +2350,20 @@ private:
 
 public:
 	EndRoll(const InitData& init) : IScene(init) {
-		// BGMや環境音が鳴っていたら止めたい場合は任意で：
-		// if (AudioAsset::IsRegistered(U"stage1BGM")) AudioAsset(U"stage1BGM").stop();
+		StopAllAudio();
 		Scene::SetBackground(ColorF{ 0,0,0 });
 	}
 
 	void update() override {
-		// Esc で即タイトルへ
 		if (KeyEscape.down()) {
 			StopAllAudio();
 			changeScene(State::Title, 0.3s);
 			return;
 		}
-		// クリック / スペースで早送り
 		if (MouseL.down() || KeySpace.down()) {
 			nextSlide();
 			return;
 		}
-		// 指定時間経過で自動的に次へ
 		const double t = sw.sF();
 		if (t >= (fadeSec + holdSec + fadeSec)) {
 			nextSlide();
@@ -1952,23 +2371,20 @@ public:
 	}
 
 	void draw() const override {
-		// 黒背景
 		Rect(Scene::Rect()).draw(ColorF{ 0,0,0 });
 
 		if (index >= (int)slides.size()) return;
 
-		// 中央に白文字（フェード）
 		const double t = sw.sF();
 		double alpha = 1.0;
 		if (t < fadeSec) {
-			alpha = t / fadeSec; // フェードイン
+			alpha = t / fadeSec;
 		}
 		else if (t > fadeSec + holdSec) {
-			alpha = 1.0 - ((t - (fadeSec + holdSec)) / fadeSec); // フェードアウト
+			alpha = 1.0 - ((t - (fadeSec + holdSec)) / fadeSec);
 		}
 		alpha = Saturate(alpha);
 
-		// 大きめフォントで中央表示（必要ならサイズ調整）
 		static const Font fBig{ 36 };
 		const Vec2 center = Scene::CenterF();
 		fBig(slides[index]).drawAt(center, ColorF{ 1,1,1, alpha });
@@ -1983,7 +2399,6 @@ void Main() {
 
 	int unlockedValue = 1;
 
-	// --- セーブデータ読込 ---
 	TextReader reader{ U"Assets/SaveData.txt" };
 
 	if (reader)
@@ -2009,10 +2424,6 @@ void Main() {
 		}
 	}
 	reader.close();
-
-	// 例：初期化時
-	//FontAsset::Register(U"ui", 18, Typeface::Regular);
-	//FontAsset::Register(U"ui_s", 14, Typeface::Regular);
 
 	App manager;
 	manager.add<Title>(State::Title);
