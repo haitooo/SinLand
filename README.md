@@ -10,7 +10,7 @@
 ## 🪟 Windows
 
 ### ZIPをダウンロードする場合
-[⬇️ SinLand_Windows.zip をダウンロード](SinLand.zip)
+[⬇️ SinLand_Windows.zip をダウンロード](SinLand＿Windows.zip)
 1. ZIPファイルを解凍してください。
 2. 解凍されたフォルダに入っているSinLand.exeを実行してください。
 3. もしSinLand.exeを移動したい場合は、SinLand.exeと同じディレクトリ内にAssetsフォルダを一緒に配置してください。音声などが正常に再生されなくなります。
