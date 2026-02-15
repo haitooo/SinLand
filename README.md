@@ -3,8 +3,8 @@
 
 > OpenSiv3D で制作した2Dアクション謎解きゲームです
 
-> デモプレイ動画
-[Youtubeで再生されます](https://youtu.be/Q-272l7zf4o?si=S6PRa-FS5Ibw15q-)
+> [デモプレイ動画](https://youtu.be/Q-272l7zf4o?si=S6PRa-FS5Ibw15q-)
+> Youtubeで再生されます
 
 ---
 
